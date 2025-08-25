@@ -1,0 +1,817 @@
+import React, { useState, useEffect } from 'react';
+import { initializeApp } from 'firebase/app';
+import {
+  getAuth,
+  signInAnonymously,
+  onAuthStateChanged,
+  signInWithCustomToken,
+} from 'firebase/auth';
+import {
+  getFirestore,
+  doc,
+  addDoc,
+  updateDoc,
+  deleteDoc,
+  onSnapshot,
+  collection,
+  Timestamp,
+} from 'firebase/firestore';
+
+// A simple Modal component for delete confirmation
+const ConfirmModal = ({ isOpen, onClose, onConfirm, message }) => {
+  if (!isOpen) return null;
+
+  return (
+    <div className="fixed inset-0 bg-gray-600 bg-opacity-50 overflow-y-auto h-full w-full flex justify-center items-center z-50">
+      <div className="bg-white p-6 rounded-lg shadow-xl max-w-sm mx-auto animate-fade-in-up">
+        <h3 className="text-lg font-semibold text-gray-900 mb-4">Confirm Deletion</h3>
+        <p className="text-sm text-gray-600 mb-6">{message}</p>
+        <div className="flex justify-end space-x-3">
+          <button
+            onClick={onClose}
+            className="px-4 py-2 text-sm font-medium text-gray-700 bg-gray-200 rounded-lg hover:bg-gray-300 transition-colors"
+          >
+            Cancel
+          </button>
+          <button
+            onClick={onConfirm}
+            className="px-4 py-2 text-sm font-medium text-white bg-red-600 rounded-lg hover:bg-red-700 transition-colors"
+          >
+            Delete
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+// Main App Component
+export default function App() {
+  // === Firebase Initialization & State Management ===
+  const [db, setDb] = useState(null);
+  const [userId, setUserId] = useState(null);
+  const [isLoading, setIsLoading] = useState(true);
+
+  // === App State for UI and Data ===
+  const [farmers, setFarmers] = useState([]);
+  const [formState, setFormState] = useState({
+    name: '',
+    phone: '',
+    area: '',
+    province: '',
+    totalAcres: '',
+    presentCrop: '',
+    presentCropAcres: '',
+    nextCrop: '',
+    nextCropAcres: '',
+    sampleDay: '',
+    sampleMonth: '',
+    sampleYear: '',
+    sampleCrop: '',
+  });
+  const [editingId, setEditingId] = useState(null);
+  const [message, setMessage] = useState('');
+  const [isModalOpen, setIsModalOpen] = useState(false);
+  const [itemToDelete, setItemToDelete] = useState(null);
+  const [phoneError, setPhoneError] = useState('');
+  const [isPdfLibraryLoaded, setIsPdfLibraryLoaded] = useState(false);
+
+  // Define crop options and date options
+  const cropOptions = ['Cotton', 'Rice', 'Maize', 'Cucumber', 'Chilli', 'Karela', 'Potato', 'Other'];
+  const provinceOptions = ['Punjab', 'Sindh', 'Balochistan', 'KPK', 'Gilgit'];
+  const [presentCropOther, setPresentCropOther] = useState('');
+  const [nextCropOther, setNextCropOther] = useState('');
+  const [isPresentCropOther, setIsPresentCropOther] = useState(false);
+  const [isNextCropOther, setIsNextCropOther] = useState(false);
+  const days = Array.from({ length: 31 }, (_, i) => i + 1);
+  const months = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
+  const years = Array.from({ length: 11 }, (_, i) => 2022 + i);
+  const [downloadDay, setDownloadDay] = useState(new Date().getDate());
+  const [downloadMonth, setDownloadMonth] = useState(months[new Date().getMonth()]);
+  const [downloadYear, setDownloadYear] = useState(new Date().getFullYear());
+
+
+  // Injects Google Fonts, jsPDF and jsPDF-Autotable into the document head
+  useEffect(() => {
+    const fontLink = document.createElement('link');
+    fontLink.href = 'https://fonts.googleapis.com/css2?family=Poppins:wght@400;600;700&display=swap';
+    fontLink.rel = 'stylesheet';
+    document.head.appendChild(fontLink);
+
+    const onJspdfLoaded = () => {
+        const jspdfAutotableScript = document.createElement('script');
+        jspdfAutotableScript.src = 'https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.5.25/jspdf.plugin.autotable.min.js';
+        jspdfAutotableScript.async = true;
+        jspdfAutotableScript.onload = () => setIsPdfLibraryLoaded(true);
+        document.body.appendChild(jspdfAutotableScript);
+    };
+
+    const jspdfScript = document.createElement('script');
+    jspdfScript.src = 'https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js';
+    jspdfScript.async = true;
+    jspdfScript.onload = onJspdfLoaded;
+    document.body.appendChild(jspdfScript);
+
+    return () => {
+      document.head.removeChild(fontLink);
+      document.body.removeChild(jspdfScript);
+      const jspdfAutotableScript = document.querySelector('script[src*="jspdf.plugin.autotable"]');
+      if (jspdfAutotableScript) {
+        document.body.removeChild(jspdfAutotableScript);
+      }
+    };
+  }, []);
+
+  // Effect to initialize Firebase and set a fixed user ID
+  useEffect(() => {
+    const firebaseConfig = JSON.parse(typeof __firebase_config !== 'undefined' ? __firebase_config : '{}');
+    const app = initializeApp(firebaseConfig);
+    const firestore = getFirestore(app);
+    const auth = getAuth(app);
+    setDb(firestore);
+
+    // This block is the corrected authentication logic to get a consistent userId
+    const checkUserAndSetId = async () => {
+      const token = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+      let authUser;
+      
+      if (token) {
+        try {
+          const credential = await signInWithCustomToken(auth, token);
+          authUser = credential.user;
+        } catch (error) {
+          console.error('Custom token sign-in failed:', error);
+          authUser = await signInAnonymously(auth).then(cred => cred.user);
+        }
+      } else {
+        authUser = await signInAnonymously(auth).then(cred => cred.user);
+      }
+      setUserId(authUser.uid);
+    };
+    checkUserAndSetId();
+    
+    // We do not need the onAuthStateChanged listener as the custom token flow handles persistence.
+    // However, if we were to use it for other purposes, it would be set up here.
+  }, []);
+
+  // Effect to fetch and listen for real-time data from Firestore
+  useEffect(() => {
+    if (db && userId) {
+      const farmerCollectionRef = collection(db, 'artifacts', typeof __app_id !== 'undefined' ? __app_id : 'default-app-id', 'users', userId, 'farmers');
+      
+      const unsubscribeData = onSnapshot(farmerCollectionRef, (snapshot) => {
+        const farmerList = snapshot.docs.map((doc) => ({
+          id: doc.id,
+          ...doc.data(),
+          createdAt: doc.data().createdAt instanceof Timestamp ? doc.data().createdAt : null,
+        }));
+        setFarmers(farmerList);
+        setIsLoading(false);
+      }, (error) => {
+        console.error("Error fetching farmers: ", error);
+        setMessage("Error loading farmer data. Please try again.");
+        setIsLoading(false);
+      });
+      return () => unsubscribeData();
+    }
+  }, [db, userId]);
+
+  // === Event Handlers and CRUD Operations ===
+  const handleInputChange = (e) => {
+    const { name, value } = e.target;
+  
+    if (name === 'phone') {
+        const numbersOnly = value.replace(/[^0-9]/g, '');
+        let formattedValue = '';
+        if (numbersOnly.length > 4) {
+            formattedValue = numbersOnly.substring(0, 4) + '-' + numbersOnly.substring(4, 11);
+        } else {
+            formattedValue = numbersOnly;
+        }
+
+        if (formattedValue.replace('-', '').length > 11) {
+            setPhoneError('Phone number must be exactly 11 digits.');
+        } else {
+            setPhoneError('');
+            setFormState({ ...formState, [name]: formattedValue });
+        }
+    } else if (name === 'presentCrop') {
+        setIsPresentCropOther(value === 'Other');
+        setFormState({ ...formState, [name]: value });
+        if (value !== 'Other') {
+            setPresentCropOther('');
+        }
+    } else if (name === 'nextCrop') {
+        setIsNextCropOther(value === 'Other');
+        setFormState({ ...formState, [name]: value });
+        if (value !== 'Other') {
+            setNextCropOther('');
+        }
+    } else if (name === 'presentCropOther') {
+        setPresentCropOther(value);
+    } else if (name === 'nextCropOther') {
+        setNextCropOther(value);
+    } else {
+      setFormState({ ...formState, [name]: value });
+    }
+  };
+
+  const handleSubmit = async (e) => {
+    e.preventDefault();
+    setMessage('');
+    
+    if (formState.phone.replace('-', '').length !== 11) {
+      setPhoneError('Please enter a valid 11-digit phone number.');
+      return;
+    }
+    
+    const sampleDate = formState.sampleDay && formState.sampleMonth && formState.sampleYear
+      ? `${formState.sampleDay.toString().padStart(2, '0')}-${(months.indexOf(formState.sampleMonth) + 1).toString().padStart(2, '0')}-${formState.sampleYear.toString().slice(-2)}`
+      : '';
+    
+    const finalFormState = { ...formState, sampleDate: sampleDate };
+    
+    try {
+      if (editingId) {
+        const farmerDocRef = doc(db, 'artifacts', typeof __app_id !== 'undefined' ? __app_id : 'default-app-id', 'users', userId, 'farmers', editingId);
+        await updateDoc(farmerDocRef, finalFormState);
+        setMessage('Farmer record updated successfully!');
+      } else {
+        const farmerCollectionRef = collection(db, 'artifacts', typeof __app_id !== 'undefined' ? __app_id : 'default-app-id', 'users', userId, 'farmers');
+        await addDoc(farmerCollectionRef, { ...finalFormState, createdAt: new Date() });
+        setMessage('Farmer record saved successfully!');
+      }
+      clearForm();
+    } catch (error) {
+      console.error('Error saving/updating farmer:', error);
+      setMessage('Error: Could not save/update farmer.');
+    }
+  };
+
+  const handleEdit = (farmer) => {
+    setEditingId(farmer.id);
+    const presentIsOther = !cropOptions.includes(farmer.presentCrop);
+    const nextIsOther = !cropOptions.includes(farmer.nextCrop);
+
+    let sampleDay = '';
+    let sampleMonth = '';
+    let sampleYear = '';
+    if (farmer.sampleDate) {
+        const [day, month, year] = farmer.sampleDate.split('-');
+        sampleDay = parseInt(day, 10);
+        sampleMonth = months[parseInt(month, 10) - 1];
+        sampleYear = parseInt('20' + year, 10);
+    }
+
+    setFormState({
+      name: farmer.name,
+      phone: farmer.phone,
+      area: farmer.area,
+      province: farmer.province,
+      totalAcres: farmer.totalAcres,
+      presentCrop: presentIsOther ? 'Other' : farmer.presentCrop,
+      presentCropAcres: farmer.presentCropAcres,
+      nextCrop: nextIsOther ? 'Other' : farmer.nextCrop,
+      nextCropAcres: farmer.nextCropAcres,
+      sampleDay: sampleDay,
+      sampleMonth: sampleMonth,
+      sampleYear: sampleYear,
+      sampleCrop: farmer.sampleCrop,
+    });
+    setPresentCropOther(presentIsOther ? farmer.presentCrop : '');
+    setNextCropOther(nextIsOther ? farmer.nextCrop : '');
+    setIsPresentCropOther(presentIsOther);
+    setIsNextCropOther(nextIsOther);
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  };
+
+  const handleDelete = (farmerId) => {
+    setItemToDelete(farmerId);
+    setIsModalOpen(true);
+  };
+
+  const handleConfirmDelete = async () => {
+    setIsModalOpen(false);
+    if (!itemToDelete) return;
+    
+    setMessage('');
+    try {
+      const farmerDocRef = doc(db, 'artifacts', typeof __app_id !== 'undefined' ? __app_id : 'default-app-id', 'users', userId, 'farmers', itemToDelete);
+      await deleteDoc(farmerDocRef);
+      setMessage('Farmer record deleted successfully!');
+    } catch (error) {
+      console.error('Error deleting farmer:', error);
+      setMessage('Error: Could not delete farmer.');
+    } finally {
+      setItemToDelete(null);
+    }
+  };
+
+  const handleDownloadPdf = () => {
+    if (!isPdfLibraryLoaded) {
+      setMessage('PDF library is not yet loaded. Please wait a moment and try again.');
+      return;
+    }
+    
+    const selectedDate = new Date(downloadYear, months.indexOf(downloadMonth), downloadDay);
+    selectedDate.setHours(0, 0, 0, 0);
+
+    const dailyFarmers = farmers.filter(farmer => {
+        if (!farmer.createdAt) return false;
+        const farmerDate = farmer.createdAt.toDate();
+        farmerDate.setHours(0, 0, 0, 0);
+        return farmerDate.getTime() === selectedDate.getTime();
+    });
+
+    if (dailyFarmers.length === 0) {
+        setMessage(`No records found for the selected date: ${selectedDate.toLocaleDateString()}.`);
+        return;
+    }
+
+    const doc = new window.jspdf.jsPDF('l', 'pt', 'a4');
+    
+    const headers = [
+      'S.No.',
+      'Name', 
+      'Phone', 
+      'Province',
+      'Area',
+      'Total Acres',
+      'Present Crop',
+      'Present Acres',
+      'Next Crop',
+      'Next Acres',
+      'Sample Date',
+      'Sample Crop',
+    ];
+    
+    const data = dailyFarmers.map((farmer, index) => [
+      index + 1,
+      farmer.name,
+      farmer.phone,
+      farmer.province,
+      farmer.area,
+      farmer.totalAcres,
+      farmer.presentCrop,
+      farmer.presentCropAcres,
+      farmer.nextCrop,
+      farmer.nextCropAcres,
+      farmer.sampleDate,
+      farmer.sampleCrop,
+    ]);
+    
+    const selectedDateFormatted = selectedDate.toLocaleDateString('en-US', {
+      year: 'numeric',
+      month: 'long',
+      day: 'numeric'
+    });
+    
+    doc.setFontSize(16);
+    doc.text('Saith Arshad Zarai Model Farm, Vehari Data', 40, 40);
+    doc.setFontSize(12);
+    doc.text(`Date: ${selectedDateFormatted}`, 40, 60);
+    
+    doc.autoTable({
+      head: [headers],
+      body: data,
+      startY: 70,
+      theme: 'grid',
+      styles: {
+        font: 'Poppins',
+        fontSize: 10,
+        cellPadding: 2,
+        halign: 'center'
+      },
+      headStyles: {
+        fillColor: '#22c55e',
+        textColor: '#ffffff',
+        fontStyle: 'bold'
+      }
+    });
+
+    doc.save(`daily_farmers_data_${selectedDateFormatted.replace(/\s/g, '_')}.pdf`);
+  };
+
+  const clearForm = () => {
+    setFormState({
+      name: '',
+      phone: '',
+      area: '',
+      province: '',
+      totalAcres: '',
+      presentCrop: '',
+      presentCropAcres: '',
+      nextCrop: '',
+      nextCropAcres: '',
+      sampleDay: '',
+      sampleMonth: '',
+      sampleYear: '',
+      sampleCrop: '',
+    });
+    setEditingId(null);
+    setPhoneError('');
+    setPresentCropOther('');
+    setNextCropOther('');
+    setIsPresentCropOther(false);
+    setIsNextCropOther(false);
+  };
+
+  // === UI Rendering ===
+  return (
+    <div className="bg-gray-50 min-h-screen p-4 sm:p-8 font-poppins antialiased text-gray-800">
+      <style>{`
+        .font-poppins {
+          font-family: 'Poppins', sans-serif;
+        }
+        @keyframes fadeIn {
+          from { opacity: 0; transform: translateY(20px); }
+          to { opacity: 1; transform: translateY(0); }
+        }
+        @keyframes fadeInScale {
+          from { opacity: 0; transform: scale(0.95); }
+          to { opacity: 1; transform: scale(1); }
+        }
+        .animate-fade-in { animation: fadeIn 0.5s ease-out; }
+        .animate-fade-in-up { animation: fadeIn 0.3s ease-out; }
+      `}</style>
+      <div className="max-w-6xl mx-auto space-y-8 animate-fade-in">
+        <header className="text-center">
+          <h1 className="text-4xl sm:text-5xl font-extrabold text-green-600 mb-2 drop-shadow-md">
+            Saith Arshad Zarai Model Farm, Vehari
+          </h1>
+          <p className="text-lg sm:text-xl text-gray-400">
+            created by: Mujahid Iqbal
+          </p>
+          <div className="mt-4 text-sm text-gray-500">
+            User ID: <span className="font-mono break-all">{userId}</span>
+          </div>
+        </header>
+
+        {/* Farmer Form */}
+        <div className="bg-white p-6 sm:p-8 rounded-2xl shadow-lg transition-all duration-300 transform hover:shadow-xl">
+          <h2 className="text-2xl font-bold text-gray-700 mb-6 border-b-2 pb-2 border-green-200">
+            {editingId ? 'Edit Farmer' : 'Add New Farmer'}
+          </h2>
+          {message && (
+            <div className="bg-green-50 border-l-4 border-green-500 text-green-700 p-4 mb-4 rounded-md animate-fade-in-up" role="alert">
+              {message}
+            </div>
+          )}
+          <form onSubmit={handleSubmit} className="space-y-4">
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+              <div>
+                <label htmlFor="name" className="block text-sm font-semibold text-gray-700 mb-1">Farmer Name</label>
+                <input
+                  type="text"
+                  name="name"
+                  id="name"
+                  value={formState.name}
+                  onChange={handleInputChange}
+                  required
+                  className="w-full p-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-green-500 focus:border-transparent transition-all duration-200"
+                />
+              </div>
+              <div>
+                <label htmlFor="phone" className="block text-sm font-semibold text-gray-700 mb-1">Phone</label>
+                <input
+                  type="tel"
+                  name="phone"
+                  id="phone"
+                  value={formState.phone}
+                  onChange={handleInputChange}
+                  placeholder="e.g., 0300-1234567"
+                  className={`w-full p-3 border rounded-lg focus:ring-2 focus:ring-green-500 focus:border-transparent transition-all duration-200 ${phoneError ? 'border-red-500' : 'border-gray-300'}`}
+                />
+                {phoneError && <p className="mt-1 text-xs text-red-500">{phoneError}</p>}
+              </div>
+              <div>
+                <label htmlFor="province" className="block text-sm font-semibold text-gray-700 mb-1">Province</label>
+                <select
+                  name="province"
+                  id="province"
+                  value={formState.province}
+                  onChange={handleInputChange}
+                  className="w-full p-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-green-500 focus:border-transparent transition-all duration-200 bg-white"
+                >
+                  <option value="" disabled>Select a province</option>
+                  {provinceOptions.map(province => (
+                    <option key={province} value={province}>{province}</option>
+                  ))}
+                </select>
+              </div>
+              <div>
+                <label htmlFor="area" className="block text-sm font-semibold text-gray-700 mb-1">Area</label>
+                <input
+                  type="text"
+                  name="area"
+                  id="area"
+                  value={formState.area}
+                  onChange={handleInputChange}
+                  className="w-full p-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-green-500 focus:border-transparent transition-all duration-200"
+                />
+              </div>
+              <div>
+                <label htmlFor="totalAcres" className="block text-sm font-semibold text-gray-700 mb-1">Total Acres</label>
+                <input
+                  type="number"
+                  name="totalAcres"
+                  id="totalAcres"
+                  value={formState.totalAcres}
+                  onChange={handleInputChange}
+                  className="w-full p-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-green-500 focus:border-transparent transition-all duration-200"
+                />
+              </div>
+              <div>
+                <label htmlFor="presentCrop" className="block text-sm font-semibold text-gray-700 mb-1">Present Crop</label>
+                <select
+                  name="presentCrop"
+                  id="presentCrop"
+                  value={formState.presentCrop}
+                  onChange={handleInputChange}
+                  className="w-full p-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-green-500 focus:border-transparent transition-all duration-200 bg-white"
+                >
+                  <option value="" disabled>Select a crop</option>
+                  {cropOptions.map(crop => (
+                    <option key={crop} value={crop}>{crop}</option>
+                  ))}
+                </select>
+                {isPresentCropOther && (
+                  <input
+                    type="text"
+                    name="presentCropOther"
+                    id="presentCropOther"
+                    value={presentCropOther}
+                    onChange={(e) => setPresentCropOther(e.target.value)}
+                    placeholder="Enter custom crop name"
+                    className="mt-2 w-full p-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-green-500 focus:border-transparent transition-all duration-200"
+                  />
+                )}
+              </div>
+              <div>
+                <label htmlFor="presentCropAcres" className="block text-sm font-semibold text-gray-700 mb-1">Present Crop Acres</label>
+                <input
+                  type="number"
+                  name="presentCropAcres"
+                  id="presentCropAcres"
+                  value={formState.presentCropAcres}
+                  onChange={handleInputChange}
+                  className="w-full p-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-green-500 focus:border-transparent transition-all duration-200"
+                />
+              </div>
+              <div>
+                <label htmlFor="nextCrop" className="block text-sm font-semibold text-gray-700 mb-1">Next Crop</label>
+                <select
+                  name="nextCrop"
+                  id="nextCrop"
+                  value={formState.nextCrop}
+                  onChange={handleInputChange}
+                  className="w-full p-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-green-500 focus:border-transparent transition-all duration-200 bg-white"
+                >
+                  <option value="" disabled>Select a crop</option>
+                  {cropOptions.map(crop => (
+                    <option key={crop} value={crop}>{crop}</option>
+                  ))}
+                </select>
+                {isNextCropOther && (
+                  <input
+                    type="text"
+                    name="nextCropOther"
+                    id="nextCropOther"
+                    value={nextCropOther}
+                    onChange={(e) => setNextCropOther(e.target.value)}
+                    placeholder="Enter custom crop name"
+                    className="mt-2 w-full p-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-green-500 focus:border-transparent transition-all duration-200"
+                  />
+                )}
+              </div>
+              <div>
+                <label htmlFor="nextCropAcres" className="block text-sm font-semibold text-gray-700 mb-1">Next Crop Acres</label>
+                <input
+                  type="number"
+                  name="nextCropAcres"
+                  id="nextCropAcres"
+                  value={formState.nextCropAcres}
+                  onChange={handleInputChange}
+                  className="w-full p-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-green-500 focus:border-transparent transition-all duration-200"
+                />
+              </div>
+            </div>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 mt-4">
+              <div className="grid grid-cols-3 gap-2">
+                <div>
+                  <label htmlFor="sampleDay" className="block text-sm font-semibold text-gray-700 mb-1">Sample Day</label>
+                  <select
+                    name="sampleDay"
+                    id="sampleDay"
+                    value={formState.sampleDay}
+                    onChange={handleInputChange}
+                    className="w-full p-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-green-500 focus:border-transparent transition-all duration-200 bg-white"
+                  >
+                    <option value="" disabled>Day</option>
+                    {days.map(day => (
+                      <option key={day} value={day}>{day}</option>
+                    ))}
+                  </select>
+                </div>
+                <div>
+                  <label htmlFor="sampleMonth" className="block text-sm font-semibold text-gray-700 mb-1">Sample Month</label>
+                  <select
+                    name="sampleMonth"
+                    id="sampleMonth"
+                    value={formState.sampleMonth}
+                    onChange={handleInputChange}
+                    className="w-full p-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-green-500 focus:border-transparent transition-all duration-200 bg-white"
+                  >
+                    <option value="" disabled>Month</option>
+                    {months.map(month => (
+                      <option key={month} value={month}>{month}</option>
+                    ))}
+                  </select>
+                </div>
+                <div>
+                  <label htmlFor="sampleYear" className="block text-sm font-semibold text-gray-700 mb-1">Sample Year</label>
+                  <select
+                    name="sampleYear"
+                    id="sampleYear"
+                    value={formState.sampleYear}
+                    onChange={handleInputChange}
+                    className="w-full p-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-green-500 focus:border-transparent transition-all duration-200 bg-white"
+                  >
+                    <option value="" disabled>Year</option>
+                    {years.map(year => (
+                      <option key={year} value={year}>{year}</option>
+                    ))}
+                  </select>
+                </div>
+              </div>
+              <div>
+                <label htmlFor="sampleCrop" className="block text-sm font-semibold text-gray-700 mb-1">Sample Crop</label>
+                <input
+                  type="text"
+                  name="sampleCrop"
+                  id="sampleCrop"
+                  value={formState.sampleCrop}
+                  onChange={handleInputChange}
+                  className="w-full p-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-green-500 focus:border-transparent transition-all duration-200"
+                />
+              </div>
+            </div>
+            <div className="flex justify-end space-x-2 pt-4">
+              <button
+                type="submit"
+                className="px-6 py-3 bg-green-600 text-white font-semibold rounded-full shadow-lg hover:bg-green-700 focus:outline-none focus:ring-2 focus:ring-green-500 focus:ring-offset-2 transition-all duration-300 transform hover:scale-105"
+              >
+                {editingId ? 'Update Record' : 'Save Farmer'}
+              </button>
+              {editingId && (
+                <button
+                  type="button"
+                  onClick={clearForm}
+                  className="px-6 py-3 bg-gray-300 text-gray-700 font-semibold rounded-full shadow-lg hover:bg-gray-400 focus:outline-none focus:ring-2 focus:ring-gray-500 focus:ring-offset-2 transition-all duration-300 transform hover:scale-105"
+                >
+                  Cancel
+                </button>
+              )}
+            </div>
+          </form>
+        </div>
+
+        {/* Farmers Table */}
+        <div className="bg-white p-6 sm:p-8 rounded-2xl shadow-lg animate-fade-in-scale">
+          <div className="flex justify-between items-center mb-6 border-b-2 pb-2 border-green-200">
+            <h2 className="text-2xl font-bold text-gray-700">All Farmers</h2>
+            <div className="flex flex-wrap items-end gap-2">
+                <div className="grid grid-cols-3 gap-2">
+                    <select
+                        value={downloadDay}
+                        onChange={(e) => setDownloadDay(e.target.value)}
+                        className="p-2 border border-gray-300 rounded-lg"
+                    >
+                        {days.map(day => (
+                            <option key={day} value={day}>{day}</option>
+                        ))}
+                    </select>
+                    <select
+                        value={downloadMonth}
+                        onChange={(e) => setDownloadMonth(e.target.value)}
+                        className="p-2 border border-gray-300 rounded-lg"
+                    >
+                        {months.map(month => (
+                            <option key={month} value={month}>{month}</option>
+                        ))}
+                    </select>
+                    <select
+                        value={downloadYear}
+                        onChange={(e) => setDownloadYear(e.target.value)}
+                        className="p-2 border border-gray-300 rounded-lg"
+                    >
+                        {years.map(year => (
+                            <option key={year} value={year}>{year}</option>
+                        ))}
+                    </select>
+                </div>
+                <button
+                    onClick={handleDownloadPdf}
+                    disabled={!isPdfLibraryLoaded}
+                    className={`px-4 py-2 text-white font-semibold rounded-full shadow-md transition-colors duration-200 ${isPdfLibraryLoaded ? 'bg-blue-600 hover:bg-blue-700' : 'bg-gray-400 cursor-not-allowed'}`}
+                >
+                    Download PDF
+                </button>
+            </div>
+          </div>
+          {isLoading ? (
+            <p className="text-center text-gray-500 py-8">Loading farmer data...</p>
+          ) : farmers.length === 0 ? (
+            <p className="text-center text-gray-500 py-8">No farmers found. Add a new one using the form above.</p>
+          ) : (
+            <div className="overflow-x-auto">
+              <table className="min-w-full divide-y divide-gray-200">
+                <thead className="bg-gray-100">
+                  <tr>
+                    <th scope="col" className="px-4 py-3 text-left text-xs font-semibold text-gray-600 uppercase tracking-wider">
+                      S.No.
+                    </th>
+                    <th scope="col" className="px-4 py-3 text-left text-xs font-semibold text-gray-600 uppercase tracking-wider">
+                      Name
+                    </th>
+                    <th scope="col" className="px-4 py-3 text-left text-xs font-semibold text-gray-600 uppercase tracking-wider">
+                      Phone
+                    </th>
+                    <th scope="col" className="px-4 py-3 text-left text-xs font-semibold text-gray-600 uppercase tracking-wider">
+                      Province
+                    </th>
+                    <th scope="col" className="px-4 py-3 text-left text-xs font-semibold text-gray-600 uppercase tracking-wider">
+                      Area
+                    </th>
+                    <th scope="col" className="px-4 py-3 text-left text-xs font-semibold text-gray-600 uppercase tracking-wider">
+                      Total Acres
+                    </th>
+                    <th scope="col" className="px-4 py-3 text-left text-xs font-semibold text-gray-600 uppercase tracking-wider">
+                      Present Crop
+                    </th>
+                    <th scope="col" className="px-4 py-3 text-left text-xs font-semibold text-gray-600 uppercase tracking-wider">
+                      Present Acres
+                    </th>
+                    <th scope="col" className="px-4 py-3 text-left text-xs font-semibold text-gray-600 uppercase tracking-wider">
+                      Next Crop
+                    </th>
+                    <th scope="col" className="px-4 py-3 text-left text-xs font-semibold text-gray-600 uppercase tracking-wider">
+                      Next Acres
+                    </th>
+                    <th scope="col" className="px-4 py-3 text-left text-xs font-semibold text-gray-600 uppercase tracking-wider">
+                      Sample Date
+                    </th>
+                    <th scope="col" className="px-4 py-3 text-left text-xs font-semibold text-gray-600 uppercase tracking-wider">
+                      Sample Crop
+                    </th>
+                    <th scope="col" className="relative px-4 py-3">
+                      <span className="sr-only">Actions</span>
+                    </th>
+                  </tr>
+                </thead>
+                <tbody className="bg-white divide-y divide-gray-200">
+                  {farmers.map((farmer, index) => (
+                    <tr key={farmer.id} className="hover:bg-green-50 transition-colors duration-200">
+                      <td className="px-4 py-4 whitespace-nowrap text-sm text-gray-500">{index + 1}</td>
+                      <td className="px-4 py-4 whitespace-nowrap text-sm font-medium text-gray-900">{farmer.name}</td>
+                      <td className="px-4 py-4 whitespace-nowrap text-sm text-gray-500">{farmer.phone}</td>
+                      <td className="px-4 py-4 whitespace-nowrap text-sm text-gray-500">{farmer.province}</td>
+                      <td className="px-4 py-4 whitespace-nowrap text-sm text-gray-500">{farmer.area}</td>
+                      <td className="px-4 py-4 whitespace-nowrap text-sm text-gray-500">{farmer.totalAcres}</td>
+                      <td className="px-4 py-4 whitespace-nowrap text-sm text-gray-500">{farmer.presentCrop}</td>
+                      <td className="px-4 py-4 whitespace-nowrap text-sm text-gray-500">{farmer.presentCropAcres}</td>
+                      <td className="px-4 py-4 whitespace-nowrap text-sm text-gray-500">{farmer.nextCrop}</td>
+                      <td className="px-4 py-4 whitespace-nowrap text-sm text-gray-500">{farmer.nextCropAcres}</td>
+                      <td className="px-4 py-4 whitespace-nowrap text-sm text-gray-500">{farmer.sampleDate}</td>
+                      <td className="px-4 py-4 whitespace-nowrap text-sm text-gray-500">{farmer.sampleCrop}</td>
+                      <td className="px-4 py-4 whitespace-nowrap text-right text-sm font-medium space-x-2">
+                        <button
+                          onClick={() => handleEdit(farmer)}
+                          className="text-green-600 hover:text-green-800 transition-colors duration-200"
+                        >
+                          Edit
+                        </button>
+                        <button
+                          onClick={() => handleDelete(farmer.id)}
+                          className="text-red-600 hover:text-red-800 transition-colors duration-200"
+                        >
+                          Delete
+                        </button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+      </div>
+      <ConfirmModal 
+        isOpen={isModalOpen}
+        onClose={() => setIsModalOpen(false)}
+        onConfirm={handleConfirmDelete}
+        message="Are you sure you want to delete this farmer record? This action cannot be undone."
+      />
+    </div>
+  );
+}
